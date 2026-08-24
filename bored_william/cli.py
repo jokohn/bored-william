@@ -63,13 +63,50 @@ def build_parser():
     return p
 
 
+def _is_blank(row):
+    """True when every field is empty or whitespace.
+
+    Spreadsheet editors routinely extend a sheet's used range past the real
+    data and then write a delimiter-only line for every remaining row -- Excel
+    will happily emit all 1,048,576 of them. Those rows are padding, not input.
+    """
+    for value in row.values():
+        # DictReader collects overflow fields into a list under the None key.
+        if isinstance(value, list):
+            if any((item or "").strip() for item in value):
+                return False
+        elif (value or "").strip():
+            return False
+    return True
+
+
 def read_input(path):
+    """Rows, passthrough columns, and the count of blank rows discarded.
+
+    Blank rows are skipped wherever they occur rather than treated as an
+    end-of-data marker. Stopping at the first one would silently truncate the
+    run if a stray empty row sat in the middle of real data, and losing
+    billboards without saying so is worse than reading a little further.
+    """
     with open(path, newline="", encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh)
         if not reader.fieldnames or "link" not in reader.fieldnames:
             raise SystemExit("error: %s has no `link` column" % path)
         passthrough = [c for c in reader.fieldnames if c not in INPUT_COLUMNS]
-        return list(reader), passthrough
+
+        rows, blanks = [], 0
+        for row in reader:
+            if _is_blank(row):
+                blanks += 1
+                continue
+            rows.append(row)
+
+    if not rows:
+        raise SystemExit(
+            "error: %s has a header but no data rows (%d blank rows skipped)"
+            % (path, blanks)
+        )
+    return rows, passthrough, blanks
 
 
 def _blank_row(src, status, message, version, now):
@@ -260,7 +297,10 @@ def main(argv=None):
     opts = build_parser().parse_args(argv)
     http.configure(opts.rate_limit)
 
-    rows, passthrough = read_input(opts.input)
+    rows, passthrough, blanks = read_input(opts.input)
+    if blanks:
+        print("%s: %d rows, %d blank rows skipped" % (opts.input, len(rows), blanks),
+              file=sys.stderr)
 
     for src in rows:
         src["_passthrough"] = {c: src.get(c, "") for c in passthrough}
@@ -336,6 +376,7 @@ def main(argv=None):
         "finished_utc": finished.isoformat(timespec="seconds"),
         "elapsed_s": round((finished - started).total_seconds(), 1),
         "input_rows": len(rows),
+        "blank_rows_skipped": blanks,
         "captures_written": counters["captured"] or counters["enumerated"],
         "captures_skipped": counters["skipped"],
         "sites_failed": counters["failed_sites"],
