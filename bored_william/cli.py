@@ -5,7 +5,9 @@ import csv
 import hashlib
 import json
 import os
+import random
 import sys
+from collections import defaultdict
 from datetime import datetime, timezone
 
 from . import __version__, geo, http, imagery, manifest, naming, photometa
@@ -16,6 +18,7 @@ DEFAULT_DISTANCE_M = 90.0
 DEFAULT_HEIGHT_M = 8.0
 DEFAULT_BOARD_WIDTH_M = 14.63  # a 48 ft bulletin
 DEFAULT_RATE_LIMIT_MS = 250
+DEFAULT_DAMP_SAMPLE = 100
 
 INPUT_COLUMNS = {"link", "site_label", "disambiguation_hint"}
 
@@ -56,6 +59,14 @@ def build_parser():
                    help="also write neighbor_panos.csv")
     p.add_argument("--dates-only", action="store_true",
                    help="enumerate captures, fetch no images")
+    p.add_argument("--damp-run", nargs="?", type=int, const=DEFAULT_DAMP_SAMPLE,
+                   default=None, metavar="N",
+                   help="fetch a random sample of N captures drawn from the "
+                        "whole corpus, to check framing before a full run "
+                        "(default: %d)" % DEFAULT_DAMP_SAMPLE)
+    p.add_argument("--seed", type=int, default=None,
+                   help="seed for --damp-run sampling; recorded in run_meta.json "
+                        "so a sample can be re-fetched after changing aim settings")
     p.add_argument("--resume", action="store_true",
                    help="skip captures already recorded as ok")
     p.add_argument("--dry-run", action="store_true",
@@ -126,7 +137,17 @@ def _blank_row(src, status, message, version, now):
     return row
 
 
-def process_row(src, opts, writer, allocator, images_root, counters, neighbor_rows):
+def process_row(src, opts, writer, allocator, images_root, counters, neighbor_rows,
+                precomputed=None, allowed_panos=None):
+    """Emit manifest rows (and images) for one input row.
+
+    `precomputed` supplies an already-fetched (reference, history) pair so a
+    corpus-wide sample does not have to enumerate every site twice.
+    `allowed_panos` restricts output to a chosen subset of this site's
+    panoramas; it is keyed per site because neighbouring billboards routinely
+    share panoramas, and a global id set would emit the same capture again
+    under each site that contains it.
+    """
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     link = (src.get("link") or "").strip()
     site_label = (src.get("site_label") or "").strip()
@@ -134,10 +155,13 @@ def process_row(src, opts, writer, allocator, images_root, counters, neighbor_ro
     passthrough = src.get("_passthrough", {})
 
     try:
-        ref = resolve_reference(link)
-        history = photometa.fetch_history(
-            ref.pano_id, include_neighbors=opts.include_neighbors
-        )
+        if precomputed is not None:
+            ref, history = precomputed
+        else:
+            ref = resolve_reference(link)
+            history = photometa.fetch_history(
+                ref.pano_id, include_neighbors=opts.include_neighbors
+            )
     except ImageForbidden:
         raise
     except BoredWilliamError as exc:
@@ -193,6 +217,8 @@ def process_row(src, opts, writer, allocator, images_root, counters, neighbor_ro
     city, region = photometa.split_locality(history.locality_raw)
 
     for cap in captures:
+        if allowed_panos is not None and cap.pano_id not in allowed_panos:
+            continue
         if opts.resume and cap.pano_id in counters["done"]:
             counters["skipped"] += 1
             continue
@@ -284,6 +310,55 @@ def process_row(src, opts, writer, allocator, images_root, counters, neighbor_ro
         writer.write(row)
 
 
+def enumerate_all(rows, opts):
+    """Resolve and enumerate every site once, keeping the results.
+
+    Sampling across the whole corpus means knowing the whole corpus first, so
+    this runs before any image is fetched. Holding the histories lets the emit
+    pass reuse them instead of paying for a second round of enumeration.
+    """
+    plans = []
+    for i, src in enumerate(rows, 1):
+        print("enumerating [%d/%d] %s" % (
+            i, len(rows), (src.get("site_label") or src.get("link") or "?")[:50]),
+            file=sys.stderr)
+        plan = {"src": src, "ref": None, "history": None, "captures": [], "error": None}
+        try:
+            ref = resolve_reference((src.get("link") or "").strip())
+            history = photometa.fetch_history(
+                ref.pano_id, include_neighbors=opts.include_neighbors
+            )
+            plan["ref"], plan["history"] = ref, history
+            plan["captures"] = [
+                c for c in history.captures
+                if opts.include_photospheres or c.pano_type == "google"
+            ]
+        except ImageForbidden:
+            raise
+        except BoredWilliamError as exc:
+            plan["error"] = (exc.code, str(exc))
+        except Exception as exc:  # noqa: BLE001 - record and carry on
+            plan["error"] = ("ERROR", "%s: %s" % (type(exc).__name__, exc))
+        plans.append(plan)
+    return plans
+
+
+def sample_captures(plans, sample_size, seed):
+    """Pick `sample_size` captures uniformly at random from the whole corpus.
+
+    Returns per-site allowed panorama ids. Sampling (site, capture) pairs
+    rather than bare panorama ids keeps shared panoramas attributed to the
+    site they were drawn for.
+    """
+    pool = [(i, cap) for i, plan in enumerate(plans) for cap in plan["captures"]]
+    rng = random.Random(seed)
+    chosen = rng.sample(pool, min(sample_size, len(pool)))
+    by_site = defaultdict(set)
+    for site_index, cap in chosen:
+        by_site[site_index].add(cap.pano_id)
+    return by_site, len(pool)
+
+
 def resolve_reference(link):
     from . import resolve as _resolve
     return _resolve.resolve(link)
@@ -296,6 +371,13 @@ def _num(value):
 def main(argv=None):
     opts = build_parser().parse_args(argv)
     http.configure(opts.rate_limit)
+
+    if opts.damp_run is not None:
+        if opts.dry_run or opts.dates_only:
+            raise SystemExit("error: --damp-run fetches images, so it cannot be "
+                             "combined with --dry-run or --dates-only")
+        if opts.damp_run < 1:
+            raise SystemExit("error: --damp-run needs a positive sample size")
 
     rows, passthrough, blanks = read_input(opts.input)
     if blanks:
@@ -346,15 +428,49 @@ def main(argv=None):
     neighbor_rows = []
     started = datetime.now(timezone.utc)
 
+    # Recorded even when generated, so a damp run can be repeated exactly with
+    # --seed after changing --assumed-distance or --fov and the two sets of
+    # images compared frame for frame.
+    seed = opts.seed if opts.seed is not None else random.randrange(2 ** 31)
+    damp_stats = {}
+
     try:
         with manifest.ManifestWriter(
             manifest_path, public_path, passthrough, append=opts.resume
         ) as writer:
-            for i, src in enumerate(rows, 1):
-                label = src.get("site_label") or src.get("link") or "?"
-                print("[%d/%d] %s" % (i, len(rows), label[:60]), file=sys.stderr)
-                process_row(src, opts, writer, allocator, images_root,
-                            counters, neighbor_rows)
+            if opts.damp_run is not None:
+                plans = enumerate_all(rows, opts)
+                by_site, pool_size = sample_captures(plans, opts.damp_run, seed)
+                sampled = sum(len(v) for v in by_site.values())
+                print("\nsampling %d of %d captures across %d of %d sites "
+                      "(seed %d)\n" % (sampled, pool_size, len(by_site),
+                                       len(rows), seed), file=sys.stderr)
+                damp_stats.update({"pool": pool_size, "sampled": sampled,
+                                   "sites_covered": len(by_site)})
+
+                for i, plan in enumerate(plans):
+                    if plan["error"]:
+                        counters["failed_sites"] += 1
+                        writer.write(_blank_row(
+                            plan["src"], plan["error"][0], plan["error"][1],
+                            __version__,
+                            datetime.now(timezone.utc).isoformat(timespec="seconds")))
+                        continue
+                    if i not in by_site:
+                        continue
+                    label = plan["src"].get("site_label") or "?"
+                    print("fetching %-40s %d capture(s)" % (
+                        label[:40], len(by_site[i])), file=sys.stderr)
+                    process_row(plan["src"], opts, writer, allocator, images_root,
+                                counters, neighbor_rows,
+                                precomputed=(plan["ref"], plan["history"]),
+                                allowed_panos=by_site[i])
+            else:
+                for i, src in enumerate(rows, 1):
+                    label = src.get("site_label") or src.get("link") or "?"
+                    print("[%d/%d] %s" % (i, len(rows), label[:60]), file=sys.stderr)
+                    process_row(src, opts, writer, allocator, images_root,
+                                counters, neighbor_rows)
     except ImageForbidden as exc:
         print("\nfatal: %s" % exc, file=sys.stderr)
         return 2
@@ -377,6 +493,10 @@ def main(argv=None):
         "elapsed_s": round((finished - started).total_seconds(), 1),
         "input_rows": len(rows),
         "blank_rows_skipped": blanks,
+        "damp_run": opts.damp_run,
+        "damp_run_seed": seed if opts.damp_run is not None else None,
+        "damp_run_pool": damp_stats.get("pool"),
+        "damp_run_sites_covered": damp_stats.get("sites_covered"),
         "captures_written": counters["captured"] or counters["enumerated"],
         "captures_skipped": counters["skipped"],
         "sites_failed": counters["failed_sites"],
