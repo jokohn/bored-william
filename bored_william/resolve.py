@@ -11,9 +11,11 @@ from urllib.parse import parse_qs, urlparse
 from . import http
 from .errors import LinkUnresolved, NotStreetView
 
-# @lat,lng,3a,{fov}y,{heading}h,{tilt}t -- the "3a" marks a Street View view.
+# @lat,lng,{n}a,{fov}y,{heading}h,{tilt}t -- the "a" segment marks a Street
+# View view. Heading is signed: Maps emits -6.57h as readily as 353.43h, and
+# refusing the minus made a perfectly good link look like a place pin.
 _AT_SEGMENT = re.compile(
-    r"@(-?\d+\.?\d*),(-?\d+\.?\d*),([\d.]+)a,([\d.]+)y,([\d.]+)h,([\d.]+)t"
+    r"@(-?\d+\.?\d*),(-?\d+\.?\d*),([\d.]+)a,([\d.]+)y,(-?[\d.]+)h,(-?[\d.]+)t"
 )
 
 # Panorama id inside the protobuf-ish `data=` parameter.
