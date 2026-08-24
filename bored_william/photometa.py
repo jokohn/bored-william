@@ -70,6 +70,31 @@ def _dig(node, *path):
     return node
 
 
+def _address_lines(root):
+    """(road_name, locality) from the variable-length address-line array.
+
+    The array is ordered most specific first, and its length depends on what
+    Google holds for the location: two lines give road then locality, one line
+    gives the locality alone. Reading fixed indices therefore wrote the
+    locality into road_name whenever no road line existed, and left the
+    locality columns empty -- 4.5% of a 5,281-row corpus, which then read as
+    three phantom roads named after cities.
+
+    Taking the locality from the end and the road from the front keeps both
+    correct for either length, and degrades sanely if a longer form appears.
+    """
+    lines = _dig(root, 3, 2)
+    if not isinstance(lines, list):
+        return None, None
+    texts = [_dig(line, 0) for line in lines]
+    texts = [t for t in texts if isinstance(t, str) and t.strip()]
+    if not texts:
+        return None, None
+    if len(texts) == 1:
+        return None, texts[0]
+    return texts[0], texts[-1]
+
+
 def _pano_record(entry):
     """(pano_id, lat, lng, heading, tilt, roll, pano_type) from a list entry."""
     pano_id = _dig(entry, 0, 1)
@@ -175,10 +200,12 @@ def fetch_history(pano_id, include_neighbors=False):
     if include_neighbors:
         neighbors = [r for r in records if r and r["lat"] is not None]
 
+    road_name, locality_raw = _address_lines(root)
+
     return SiteHistory(
         captures=captures,
-        road_name=_dig(root, 3, 2, 0, 0),
-        locality_raw=_dig(root, 3, 2, 1, 0),
+        road_name=road_name,
+        locality_raw=locality_raw,
         copyright_string=_dig(root, 4, 0, 0, 0, 0),
         neighbors=neighbors,
     )
