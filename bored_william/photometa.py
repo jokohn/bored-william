@@ -144,6 +144,31 @@ def fetch_history(pano_id, include_neighbors=False):
             )
         )
 
+    # The time-travel array lists the OTHER captures at a location and omits
+    # the panorama currently being displayed -- the one the share link was
+    # framed on. Left alone, every seed link loses exactly one capture, and
+    # because links are framed from current imagery it is usually the most
+    # recent one. Its date is carried separately from the array.
+    if pano_id not in seen:
+        ref_date = _dig(root, 6, 7)
+        rec = next((r for r in records if r and r["pano_id"] == pano_id), None)
+        if (rec and rec["lat"] is not None and isinstance(ref_date, list)
+                and len(ref_date) >= 2 and ref_date[0] and ref_date[1]
+                and 1 <= int(ref_date[1]) <= 12):
+            captures.append(
+                Capture(
+                    pano_id=rec["pano_id"],
+                    year=int(ref_date[0]),
+                    month=int(ref_date[1]),
+                    lat=rec["lat"],
+                    lng=rec["lng"],
+                    heading_deg=rec["heading_deg"],
+                    tilt_deg=rec["tilt_deg"],
+                    roll_deg=rec["roll_deg"],
+                    pano_type=rec["pano_type"],
+                )
+            )
+
     captures.sort(key=lambda c: (c.year, c.month))
 
     neighbors = None
