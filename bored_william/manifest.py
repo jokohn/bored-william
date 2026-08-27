@@ -45,6 +45,7 @@ COLUMNS = [
     "view_yaw_deg",
     "view_pitch_deg",
     "fov_deg",
+    "requested_width_px",
     "image_width_px",
     "image_height_px",
     "image_file",
@@ -53,6 +54,9 @@ COLUMNS = [
     "est_distance_m",
     "est_board_angular_width_deg",
     "assumed_board_width_m",
+    "assumed_distance_m",
+    "assumed_height_m",
+    "target_source",
     # Status
     "status",
     "error_message",

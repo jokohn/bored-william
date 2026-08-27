@@ -20,7 +20,32 @@ DEFAULT_BOARD_WIDTH_M = 14.63  # a 48 ft bulletin
 DEFAULT_RATE_LIMIT_MS = 250
 DEFAULT_DAMP_SAMPLE = 100
 
-INPUT_COLUMNS = {"link", "site_label", "disambiguation_hint"}
+INPUT_COLUMNS = {"link", "site_label", "disambiguation_hint",
+                 "assumed_distance", "assumed_height",
+                 "board_lat", "board_lng"}
+
+
+def _row_float(src, column, fallback, allow_negative=False):
+    """Per-row override for an aiming assumption, falling back to the flag.
+
+    Board setback varies enormously along a corridor -- shoulder-mounted boards
+    sit ~25 m out where freeway boards sit ~90 m -- and a single global default
+    cannot serve both. Pitch is the parameter that suffers: it is
+    atan(height/distance), so it swings fast as distance shrinks, and a board
+    aimed for 90 m that is really at 27 m lands ~12 degrees above frame centre.
+    """
+    raw = (src.get(column) or "").strip()
+    if not raw:
+        return fallback, False
+    try:
+        value = float(raw)
+    except ValueError:
+        return fallback, False
+    # Coordinates are legitimately negative; only the scalar assumptions
+    # (distance, height) must be positive to be meaningful.
+    if allow_negative or value > 0:
+        return value, True
+    return fallback, False
 
 
 def build_parser():
@@ -195,11 +220,29 @@ def process_row(src, opts, writer, allocator, images_root, counters, neighbor_ro
         return
 
     # Stage 03: stand a synthetic target where the billboard is, by walking out
-    # along the heading the user framed. Precision is not needed -- the frame is
-    # wide enough that a distance estimate wrong by 2x still lands the board.
-    target_lat, target_lng = geo.project(
-        ref.lat, ref.lng, ref.heading_deg, opts.assumed_distance
-    )
+    # along the heading the user framed. A per-row override wins over the flag
+    # where one is supplied; tolerance for a wrong distance shrinks with the
+    # field of view, so a tight fov needs the real setback rather than a global
+    # guess.
+    site_distance, distance_from_row = _row_float(src, "assumed_distance",
+                                                  opts.assumed_distance)
+    site_height, _ = _row_float(src, "assumed_height", opts.assumed_height)
+
+    # A measured board position beats any distance along an assumed heading:
+    # projecting can only place the target somewhere on the reference link's
+    # ray, and the board is rarely exactly on it. Where calibration has
+    # supplied real coordinates, aim at them.
+    board_lat, has_lat = _row_float(src, "board_lat", None, allow_negative=True)
+    board_lng, has_lng = _row_float(src, "board_lng", None, allow_negative=True)
+    if has_lat and has_lng:
+        target_lat, target_lng = board_lat, board_lng
+        target_source = "board_latlng"
+        site_distance = geo.distance_m(ref.lat, ref.lng, target_lat, target_lng)
+    else:
+        target_lat, target_lng = geo.project(
+            ref.lat, ref.lng, ref.heading_deg, site_distance
+        )
+        target_source = "row_distance" if distance_from_row else "default"
 
     site_slug = naming.site_dir_name(site_label, link, ref.pano_id)
     site_slug = allocator.allocate(site_slug, link)
@@ -225,8 +268,10 @@ def process_row(src, opts, writer, allocator, images_root, counters, neighbor_ro
 
         distance = geo.distance_m(cap.lat, cap.lng, target_lat, target_lng)
         yaw = geo.bearing(cap.lat, cap.lng, target_lat, target_lng)
-        pitch = geo.pitch_for(opts.assumed_height, distance)
-        width = geo.width_for_fov(opts.fov)
+        pitch = geo.pitch_for(site_height, distance)
+        # Native sampling, clamped to what the endpoint will actually render.
+        # Asking for more returns 200 and a silently downscaled image.
+        width = min(geo.width_for_fov(opts.fov), imagery.MAX_DELIVERED_WIDTH)
         height = int(round(width * 2 / 3))
 
         src_url = imagery.image_url(cap.pano_id, yaw, pitch, width, height, opts.fov)
@@ -266,6 +311,9 @@ def process_row(src, opts, writer, allocator, images_root, counters, neighbor_ro
                 geo.angular_width(opts.assumed_board_width, distance), 2
             ),
             "assumed_board_width_m": opts.assumed_board_width,
+            "assumed_distance_m": round(site_distance, 1),
+            "assumed_height_m": round(site_height, 1),
+            "target_source": target_source,
             "image_source_url": src_url,
             "status": "ok",
         })
@@ -275,7 +323,7 @@ def process_row(src, opts, writer, allocator, images_root, counters, neighbor_ro
             writer.write(row)
             continue
 
-        row.update({"image_width_px": width, "image_height_px": height})
+        row["requested_width_px"] = width
 
         rel_dir = os.path.join("images", site_slug) if opts.group_by_site else "images"
         filename = naming.image_filename(site_slug, cap.date, cap.pano_id)
@@ -302,9 +350,18 @@ def process_row(src, opts, writer, allocator, images_root, counters, neighbor_ro
         with open(os.path.join(abs_dir, filename), "wb") as fh:
             fh.write(blob)
 
+        # Dimensions and px_per_degree describe the bytes on disk, never the
+        # request. The endpoint downscales silently, so a recorded width taken
+        # from the request would overstate the resolution of every row -- and
+        # px_per_degree is the field used to judge whether fine print is
+        # legible at all.
+        actual_w, actual_h = imagery.jpeg_dimensions(blob)
         row.update({
             "image_file": rel_path.replace("\\", "/"),
             "image_sha256": hashlib.sha256(blob).hexdigest(),
+            "image_width_px": actual_w or "",
+            "image_height_px": actual_h or "",
+            "px_per_degree": round(actual_w / opts.fov, 2) if actual_w else "",
         })
         counters["captured"] += 1
         writer.write(row)
