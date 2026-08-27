@@ -18,10 +18,16 @@ classifiers = [
 ]
 dependencies = []
 
+# Stage 1 (fetch) stays stdlib-only so it can run anywhere. The reader
+# stages need an API client and an image library, so they are an opt-in
+# extra rather than a cost imposed on everyone who only wants images.
+[project.optional-dependencies]
+reader = ["anthropic>=1.0", "pillow>=10"]
+
 # One console script. Stages are subcommands of it, not separate
 # executables -- see bored_william/main.py.
 [project.scripts]
 bored-william = "bored_william.main:main"
 
 [tool.setuptools]
-packages = ["bored_william"]
+packages = ["bored_william", "bored_william.reader"]
