@@ -12,7 +12,7 @@ appeared in a previous row manufactures a trend that is undetectable
 downstream.
 """
 
-PROMPT_VERSION = "1.0.0"
+PROMPT_VERSION = "1.1.0"
 
 GATE_SYSTEM = """\
 You are inspecting a Google Street View photograph that is supposed to contain \
@@ -81,7 +81,7 @@ bezel, unusual brightness, or refresh banding
 - `indeterminate`: cannot tell\
 """
 
-EXTRACT_SYSTEM = """\
+_EXTRACT_TEMPLATE = """\
 You are transcribing a cropped photograph of a single roadside billboard. \
 Record what is on the board. Everything you return must be an observation \
 about this specific image.
@@ -115,28 +115,7 @@ capitalisation. Include `[illegible]` and `[obstructed]` markers in place.
 
 Return null only if there is no text at all.
 
-## html_replica
-
-A standalone HTML fragment that reproduces the board closely enough that a \
-person could see roughly what it looked like, and a program could analyse its \
-colour, typography, and layout.
-
-Hard constraints:
-- NO JavaScript. NO external stylesheets, fonts, or images. Inline CSS only.
-- Use generic font families only (`sans-serif`, `serif`, `monospace`, \
-`cursive`) with weight and style chosen to approximate the original.
-- Reproduce approximate position, size, and colour of every text element. \
-Use hex colours sampled from the image.
-- Represent the board's overall aspect ratio and background colour.
-- Replace each image or photograph on the board with a plain-English \
-description under 280 characters, in a visibly distinct block \
-(e.g. a dashed border) so it is not mistaken for real content.
-- Render `[illegible]` text as a visible placeholder marked as unreadable, \
-never as guessed text.
-- Mark obstructions in place and style them so a reader can see they are \
-obstructions, not part of the board's design.
-
-## The remaining fields
+{html_section}## The remaining fields
 
 - `advertiser_name_shown`: the advertiser's name AS PRINTED, or null
 - `advertiser_url_shown`: a URL AS PRINTED, or null
@@ -193,6 +172,46 @@ def gate_user_text(width, height, hint=None):
         )
     parts.append("Inspect the billboard and return the structured result.")
     return "\n\n".join(parts)
+
+
+_EXTRACT_HTML_SECTION = """\
+## html_replica
+
+A standalone HTML fragment that reproduces the board closely enough that a \
+person could see roughly what it looked like, and a program could analyse its \
+colour, typography, and layout.
+
+Hard constraints:
+- NO JavaScript. NO external stylesheets, fonts, or images. Inline CSS only.
+- Use generic font families only (`sans-serif`, `serif`, `monospace`, \
+`cursive`) with weight and style chosen to approximate the original.
+- Reproduce approximate position, size, and colour of every text element. \
+Use hex colours sampled from the image.
+- Represent the board's overall aspect ratio and background colour.
+- Replace each image or photograph on the board with a plain-English \
+description under 280 characters, in a visibly distinct block \
+(e.g. a dashed border) so it is not mistaken for real content.
+- Render `[illegible]` text as a visible placeholder marked as unreadable, \
+never as guessed text.
+- Mark obstructions in place and style them so a reader can see they are \
+obstructions, not part of the board's design.
+
+"""
+
+
+def extract_system(include_html=False):
+    """Extraction prompt, with the HTML reproduction section omitted
+    unless it is asked for.
+
+    The replica is by far the most expensive field -- the only one
+    generating hundreds to low-thousands of output tokens, against tens
+    for everything else -- so it is off by default. Dropping it from the
+    prompt as well as the schema matters: a model told to build a replica
+    and given nowhere to put it either wastes tokens on one or tries to
+    smuggle it into another field.
+    """
+    return _EXTRACT_TEMPLATE.format(
+        html_section=_EXTRACT_HTML_SECTION if include_html else "")
 
 
 EXTRACT_USER_TEXT = (

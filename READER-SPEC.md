@@ -116,7 +116,7 @@ One row per capture. `layer` is part of the schema, not documentation.
 | `board_state` | enum? | observed | 1 | Null when indeterminate — see the null-rate warning |
 | `board_format` | enum | observed | 1 | Digital boards rotate; see Known confounds |
 | `text_verbatim` | string? | observed | 2 | All text, exactly as rendered, sealed |
-| `html_replica` | string? | observed | 2 | Positions, colors, fonts, image descriptions |
+| `html_replica` | string? | observed | 2 | Positions, colors, fonts, image descriptions. **Opt-in via `--html`; empty otherwise** |
 | `advertiser_name_shown` | string? | observed | 2 | As printed |
 | `advertiser_url_shown` | string? | observed | 2 | Primary identity anchor when present |
 | `product_named` | string? | observed | 2 | As printed |
@@ -280,8 +280,10 @@ Rough order of magnitude for 5,281 images; confirm against `count_tokens` in the
 | All Opus, Batch API | ~$120 |
 
 `html_replica` is the dominant cost — the only field generating hundreds to low-thousands
-of output tokens, and output bills at 5× input. If cost needs to come down, that field is
-the lever, not the model choice.
+of output tokens, and output bills at 5× input. It is therefore **off by default** and
+enabled with `--html`. When off it is dropped from the prompt *and* the output schema, not
+merely left null: a nullable field is still part of the contract the model is asked to
+fill, which is most of the expense. The extraction token ceiling drops accordingly.
 
 Two levers, in order of size: the **Batch API** halves everything and this workload has
 no latency requirement, and **prompt caching** on the system prompt and taxonomy block,

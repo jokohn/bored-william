@@ -233,9 +233,11 @@ def main(argv=None):
         return 0
 
     os.makedirs(opts.outdir, exist_ok=True)
+    # Calibration only ever runs the gate; the extraction prompt is
+    # supplied for completeness and never used.
     reader = Reader(model=opts.model).with_prompts(
-        prompts.GATE_SYSTEM, prompts.EXTRACT_SYSTEM, prompts.DERIVE_SYSTEM
-    )
+        prompts.GATE_SYSTEM, prompts.extract_system(False),
+        prompts.DERIVE_SYSTEM)
 
     results = []
     lock = threading.Lock()

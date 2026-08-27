@@ -22,8 +22,8 @@ from .schema import (
     NOTHING_TO_READ,
     TAXONOMY_VERSION,
     DeriveResult,
-    ExtractResult,
     GateResult,
+    extract_model,
 )
 
 # Approximate, for reporting only. Real spend comes from the console; this is
@@ -70,6 +70,12 @@ def build_parser():
     p.add_argument("--no-keep-crops", action="store_true",
                    help="delete crops after reading; they are kept by default "
                         "because the advertiser audit needs the picture")
+    p.add_argument("--html", action="store_true",
+                   help="also produce an HTML reproduction of each board. "
+                        "Off by default: it is the only field generating "
+                        "hundreds to low-thousands of output tokens, and "
+                        "output bills at five times input, so it roughly "
+                        "doubles the cost of a run")
     p.add_argument("--dry-run", action="store_true",
                    help="resolve the work list and print it, call nothing")
     return p
@@ -172,7 +178,7 @@ def blank_row(image_file, status, message, models, now):
     return row
 
 
-def read_one(item, reader, hints, crops_dir, keep_crops):
+def read_one(item, reader, hints, crops_dir, keep_crops, want_html=False):
     """Run the three passes for one image. Always returns a row."""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     models = (reader.gate_model, reader.model)
@@ -229,7 +235,8 @@ def read_one(item, reader, hints, crops_dir, keep_crops):
 
     # --- pass 2: extract ----------------------------------------------------
     try:
-        ex = reader.extract(crop_path, prompts.EXTRACT_USER_TEXT, ExtractResult)
+        ex = reader.extract(crop_path, prompts.EXTRACT_USER_TEXT,
+                            extract_model(want_html))
     except ConfigurationError:
         raise
     except RefusalError as exc:
@@ -248,7 +255,7 @@ def read_one(item, reader, hints, crops_dir, keep_crops):
 
     row.update({
         "text_verbatim": ex.text_verbatim,
-        "html_replica": ex.html_replica,
+        "html_replica": getattr(ex, "html_replica", None),
         "advertiser_name_shown": ex.advertiser_name_shown,
         "advertiser_url_shown": ex.advertiser_url_shown,
         "product_named": ex.product_named,
@@ -312,9 +319,11 @@ def main(argv=None):
         return 0
 
     hints = load_hints(opts.boards)
-    reader = Reader(model=opts.model, gate_model=opts.gate_model).with_prompts(
-        prompts.GATE_SYSTEM, prompts.EXTRACT_SYSTEM, prompts.DERIVE_SYSTEM
-    )
+    reader = Reader(model=opts.model, gate_model=opts.gate_model,
+                    extract_max_tokens=None if opts.html else 4000)
+    reader.with_prompts(prompts.GATE_SYSTEM,
+                        prompts.extract_system(opts.html),
+                        prompts.DERIVE_SYSTEM)
 
     counts = defaultdict(int)
     lock = threading.Lock()
@@ -325,7 +334,7 @@ def main(argv=None):
           with ThreadPoolExecutor(max_workers=opts.concurrency) as pool:
               futures = {
                   pool.submit(read_one, item, reader, hints, crops_dir,
-                              not opts.no_keep_crops): item
+                              not opts.no_keep_crops, opts.html): item
                   for item in work
               }
               for i, future in enumerate(as_completed(futures), 1):
@@ -371,6 +380,7 @@ def main(argv=None):
         "prompt_version": prompts.PROMPT_VERSION,
         "taxonomy_version": TAXONOMY_VERSION,
         "naics_vintage": NAICS_VINTAGE,
+        "html_replica_enabled": bool(opts.html),
         "argv": sys.argv[1:] if argv is None else list(argv),
         "model": opts.model,
         "gate_model": opts.gate_model or opts.model,

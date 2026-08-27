@@ -113,13 +113,15 @@ class GateResult(BaseModel):
 
 
 class ExtractResult(BaseModel):
-    """Pass 2. Observations only -- nothing here is an inference."""
+    """Pass 2. Observations only -- nothing here is an inference.
+
+    This is the default shape. `html_replica` is absent: it is the single most
+    expensive field in the schema, and most analyses never touch it. The
+    variant carrying it is below, selected by --html.
+    """
 
     text_verbatim: Optional[str] = Field(
         description="Every piece of text on the board, exactly as rendered"
-    )
-    html_replica: Optional[str] = Field(
-        description="Standalone HTML reproduction; no JS, no external assets"
     )
     advertiser_name_shown: Optional[str] = Field(
         description="Advertiser name as printed on the board, or null"
@@ -137,6 +139,24 @@ class ExtractResult(BaseModel):
     language: Optional[str] = Field(
         description="Primary language of the copy as an ISO 639-1 code"
     )
+
+
+class ExtractResultWithHtml(ExtractResult):
+    """Extraction plus the HTML reproduction, selected by --html.
+
+    Kept as a separate model rather than an optional field so the replica is
+    genuinely absent from the output contract by default. A nullable field
+    would still be part of the schema the model is asked to fill, which is
+    most of the cost.
+    """
+
+    html_replica: Optional[str] = Field(
+        description="Standalone HTML reproduction; no JS, no external assets"
+    )
+
+
+def extract_model(include_html=False):
+    return ExtractResultWithHtml if include_html else ExtractResult
 
 
 class DeriveResult(BaseModel):

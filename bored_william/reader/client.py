@@ -112,7 +112,8 @@ def _parsed(message):
 
 
 class Reader:
-    def __init__(self, model=DEFAULT_MODEL, gate_model=None, max_retries=3, timeout=180.0):
+    def __init__(self, model=DEFAULT_MODEL, gate_model=None, max_retries=3,
+                 timeout=180.0, extract_max_tokens=None):
         self._client = anthropic.Anthropic(max_retries=max_retries, timeout=timeout)
         self.model = model
         # The gate may run a cheaper model than extraction, but that is a
@@ -120,12 +121,17 @@ class Reader:
         # poisons everything downstream of it, so it defaults to the same
         # model rather than quietly economising.
         self.gate_model = gate_model or model
+        # Without the HTML replica the extraction pass emits tens of tokens,
+        # not thousands, so the default ceiling is pure headroom.
+        self.max_tokens = dict(MAX_TOKENS)
+        if extract_max_tokens:
+            self.max_tokens["extract"] = extract_max_tokens
         self.usage = Usage()
 
     def _call(self, pass_name, model, system, content, output_format):
         request = {
             "model": model,
-            "max_tokens": MAX_TOKENS[pass_name],
+            "max_tokens": self.max_tokens[pass_name],
             # The system block is byte-identical across every image, so it is
             # the natural cache prefix. Volatile content (the image) follows
             # it, never precedes it.
