@@ -182,7 +182,7 @@ def write_outputs(outdir, boards_path, results):
 
     diag_cols = ["source_link", "status", "sightings", "frames_tried",
                  "board_lat", "board_lng", "distance_m", "height_m",
-                 "bearing_spread_deg", "residual_m", "note"]
+                 "bearing_spread_deg", "residual_m", "flags", "note"]
     with open(os.path.join(outdir, "calibration.csv"), "w", newline="",
               encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=diag_cols, extrasaction="ignore")

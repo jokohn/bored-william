@@ -26,8 +26,30 @@ MIN_DISTANCE_M = 5.0
 MAX_DISTANCE_M = 400.0
 
 # Boards sit above the roadway; a solved height outside this is a bad fit.
-MIN_HEIGHT_M = -2.0
+# The floor stays permissive because a camera on an elevated deck can sit level
+# with a board -- a legitimate solve came back at 3.2 m on a raised stretch of
+# freeway. Suspicious-but-possible values are flagged rather than rejected; see
+# the warn thresholds below.
+MIN_HEIGHT_M = 0.0
 MAX_HEIGHT_M = 40.0
+
+# Warn thresholds. These do not reject a solution, they mark it for review.
+# Height alone cannot separate a good solve from a bad one -- a weaker model's
+# heights (median 3.1 m) overlapped a stronger model's lowest legitimate answer
+# (3.2 m) -- so no single one of these is decisive. Together they describe the
+# signature of imprecise bounding boxes: boxes that wander between frames
+# inflate the apparent bearing spread, which makes the rays cross too early and
+# drags both distance and height down at once.
+LOW_HEIGHT_WARN_M = 4.0
+CLOSE_DISTANCE_WARN_M = 20.0
+HIGH_RESIDUAL_WARN_M = 0.75
+
+# Residual is the RMS distance from the solution to each ray. Two rays in a
+# plane always meet at exactly one point, so a 2-ray solve reports 0.00 by
+# construction -- it looks like the best possible fit while actually being the
+# weakest evidence available. Below this many rays, the number is withheld
+# rather than reported as a perfect score.
+MIN_RAYS_FOR_RESIDUAL = 3
 
 
 class Unsolvable(Exception):
@@ -179,6 +201,21 @@ def solve(observations):
         raise Unsolvable("solved height %.1f m is outside the plausible band"
                          % height)
 
+    # Withheld below three rays: with two, the residual is 0.00 by
+    # construction and reads as a perfect fit on the weakest evidence.
+    reportable_residual = (round(residual, 2)
+                           if len(rays) >= MIN_RAYS_FOR_RESIDUAL else None)
+
+    flags = []
+    if len(rays) < MIN_RAYS_FOR_RESIDUAL:
+        flags.append("few_rays")
+    if height < LOW_HEIGHT_WARN_M:
+        flags.append("low_height")
+    if distance < CLOSE_DISTANCE_WARN_M:
+        flags.append("close_distance")
+    if reportable_residual is not None and reportable_residual > HIGH_RESIDUAL_WARN_M:
+        flags.append("high_residual")
+
     return {
         "board_lat": round(board_lat, 7),
         "board_lng": round(board_lng, 7),
@@ -186,5 +223,6 @@ def solve(observations):
         "height_m": round(height, 1),
         "rays": len(rays),
         "bearing_spread_deg": round(_bearing_spread([r[2] for r in rays]), 2),
-        "residual_m": round(residual, 2),
+        "residual_m": reportable_residual,
+        "flags": ";".join(flags),
     }

@@ -14,10 +14,16 @@ import anthropic
 
 DEFAULT_MODEL = "claude-opus-5"
 
-# Effort is set per pass. The gate is classification and localisation, which is
-# not intelligence-sensitive; the extraction pass writes an HTML reproduction,
-# which is. Paying `high` on both would roughly double spend for no gain on the
-# cheap half.
+# Effort is set per pass. The extraction pass writes an HTML reproduction and
+# needs the headroom; the gate and the derive pass do not.
+#
+# Effort is not the same lever as model choice, and the gate should NOT be run
+# on a weaker model to save money. It localises as well as classifies, and that
+# bounding box feeds both the crop and -- in calibration -- the triangulation,
+# where small angular errors become large positional ones. Measured on nine
+# sites: Haiku and Opus both "solved" 7, but Haiku's median board height came
+# out at 3.1 m against Opus's 11.0 m, and the two disagreed on position by a
+# median of 79 m. See READER-SPEC.md, "Do not economise on the gate".
 EFFORT = {"gate": "low", "extract": "high", "derive": "low"}
 MAX_TOKENS = {"gate": 4000, "extract": 12000, "derive": 2000}
 

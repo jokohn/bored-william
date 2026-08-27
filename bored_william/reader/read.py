@@ -59,7 +59,10 @@ def build_parser():
     p.add_argument("--model", default=DEFAULT_MODEL,
                    help="model for extract and derive (default: %(default)s)")
     p.add_argument("--gate-model", default=None,
-                   help="model for the gate pass (default: same as --model)")
+                   help="model for the gate pass (default: same as --model). "
+                        "Not a place to economise: the gate localises as well "
+                        "as classifies, and a loose bounding box degrades "
+                        "every stage downstream of it")
     p.add_argument("--concurrency", type=int, default=4, metavar="N",
                    help="parallel images in flight (default: %(default)s)")
     p.add_argument("--resume", action="store_true",

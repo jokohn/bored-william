@@ -278,18 +278,41 @@ Rough order of magnitude for 5,281 images; confirm against `count_tokens` in the
 |---|---|
 | All `claude-opus-5` | ~$240 |
 | All Opus, Batch API | ~$120 |
-| Haiku gate + Opus extract, Batch API | ~$90 |
 
 `html_replica` is the dominant cost — the only field generating hundreds to low-thousands
 of output tokens, and output bills at 5× input. If cost needs to come down, that field is
 the lever, not the model choice.
 
-Three levers, in order of size: the **Batch API** halves everything and this workload has
-no latency requirement; **prompt caching** on the system prompt and taxonomy block, which
-is byte-identical across every call and comfortably exceeds the minimum cacheable prefix
-(stable block first, image after); and the **model split**, which should be decided from
-pilot crop-accuracy numbers rather than guessed, since a bad bounding box poisons
-everything downstream of it.
+Two levers, in order of size: the **Batch API** halves everything and this workload has
+no latency requirement, and **prompt caching** on the system prompt and taxonomy block,
+which is byte-identical across every call (stable block first, image after). Note that
+smaller models have a higher minimum cacheable prefix, so caching that works on Opus may
+silently not apply elsewhere — check `cache_read_input_tokens` rather than assuming.
+
+### Do not economise on the gate
+
+An earlier version of this spec proposed a cheaper model for the gate, on the reasoning
+that it is "just classification." That reasoning is wrong, and measurement showed it.
+
+The gate does not only classify — it **localises**, and that bounding box is load-bearing.
+It sets the crop the extraction pass reads, and in calibration it is the sole input to
+triangulation, where small angular errors are amplified into large positional ones.
+
+A nine-site calibration run compared `claude-opus-5` against `claude-haiku-4-5`. Both
+solved 7 of 9, which is exactly the trap — the headline number matched and the outputs did
+not. Median solved board height was **11.0 m on Opus against 3.1 m on Haiku**; five of
+Haiku's seven solutions put the board under 6 m, one at 0.7 m. The two disagreed on board
+position by a median of **79 m**. On the one site with an independent estimate (~93 m, from
+a hand measurement that was separately confirmed by correct framing at a 45° field of
+view), Opus returned 104 m and Haiku returned 25 m.
+
+The failure signature is visible in the diagnostics: Haiku's bearing spread was larger on
+identical camera geometry, which can only come from the box moving between frames, and its
+residual was four times higher. Imprecise localisation makes rays cross too early, dragging
+distance and height down together.
+
+Use the strongest available model for the gate. The saving on a full corpus is a few
+dollars; a mis-calibrated corpus costs a re-fetch of every image.
 
 Batch results return in arbitrary order — key on `custom_id`, never position.
 
