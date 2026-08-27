@@ -16,7 +16,7 @@ import anthropic
 from .. import __version__
 from . import crop as crop_mod
 from . import prompts, store
-from .client import DEFAULT_MODEL, Reader, RefusalError
+from .client import ConfigurationError, DEFAULT_MODEL, Reader, RefusalError
 from .schema import (
     NAICS_VINTAGE,
     NOTHING_TO_READ,
@@ -185,6 +185,8 @@ def read_one(item, reader, hints, crops_dir, keep_crops):
             prompts.gate_user_text(width, height, hint),
             GateResult,
         )
+    except ConfigurationError:
+        raise
     except RefusalError as exc:
         return blank_row(image_file, "REFUSAL", str(exc), models, now)
     except (anthropic.APIStatusError, anthropic.APIConnectionError) as exc:
@@ -225,6 +227,8 @@ def read_one(item, reader, hints, crops_dir, keep_crops):
     # --- pass 2: extract ----------------------------------------------------
     try:
         ex = reader.extract(crop_path, prompts.EXTRACT_USER_TEXT, ExtractResult)
+    except ConfigurationError:
+        raise
     except RefusalError as exc:
         row.update({"status": "REFUSAL", "error_message": str(exc)})
         return row
@@ -313,29 +317,41 @@ def main(argv=None):
     lock = threading.Lock()
     started = datetime.now(timezone.utc)
 
-    with store.Writer(out_path, append=opts.resume) as writer:
-        with ThreadPoolExecutor(max_workers=opts.concurrency) as pool:
-            futures = {
-                pool.submit(read_one, item, reader, hints, crops_dir,
-                            not opts.no_keep_crops): item
-                for item in work
-            }
-            for i, future in enumerate(as_completed(futures), 1):
-                item = futures[future]
-                try:
-                    row = future.result()
-                except Exception as exc:  # noqa: BLE001
-                    row = blank_row(item["image_file"], "ERROR",
-                                    "%s: %s" % (type(exc).__name__, exc),
-                                    (reader.gate_model, reader.model),
-                                    datetime.now(timezone.utc).isoformat(
-                                        timespec="seconds"))
-                writer.write(row)
-                with lock:
-                    counts[row["status"]] += 1
-                print("[%d/%d] %-52s %s" % (i, len(work),
-                                            item["image_file"][-52:],
-                                            row["status"]), file=sys.stderr)
+    try:
+        with store.Writer(out_path, append=opts.resume) as writer:
+          with ThreadPoolExecutor(max_workers=opts.concurrency) as pool:
+              futures = {
+                  pool.submit(read_one, item, reader, hints, crops_dir,
+                              not opts.no_keep_crops): item
+                  for item in work
+              }
+              for i, future in enumerate(as_completed(futures), 1):
+                  item = futures[future]
+                  try:
+                      row = future.result()
+                  except ConfigurationError:
+                      # A rejected request is not a property of this image. Let
+                      # it out rather than writing thousands of identical rows.
+                      raise
+                  except Exception as exc:  # noqa: BLE001
+                      row = blank_row(item["image_file"], "ERROR",
+                                      "%s: %s" % (type(exc).__name__, exc),
+                                      (reader.gate_model, reader.model),
+                                      datetime.now(timezone.utc).isoformat(
+                                          timespec="seconds"))
+                  writer.write(row)
+                  with lock:
+                      counts[row["status"]] += 1
+                  print("[%d/%d] %-52s %s" % (i, len(work),
+                                              item["image_file"][-52:],
+                                              row["status"]), file=sys.stderr)
+    except ConfigurationError as exc:
+        print("\nfatal: %s" % exc, file=sys.stderr)
+        print("\nThis fails identically on every image, so the run stopped "
+              "rather than repeating it. Rows already written are kept; "
+              "rerun with --resume once the configuration is fixed.",
+              file=sys.stderr)
+        return 2
 
     finished = datetime.now(timezone.utc)
     usage = reader.usage.as_dict()

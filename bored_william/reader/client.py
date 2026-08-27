@@ -22,6 +22,38 @@ EFFORT = {"gate": "low", "extract": "high", "derive": "low"}
 MAX_TOKENS = {"gate": 4000, "extract": 12000, "derive": 2000}
 
 
+# Adaptive thinking and output_config.effort belong to the 4.6-and-later
+# generation. Older models reject them outright -- `effort` errors on Sonnet 4.5
+# and Haiku 4.5, and those models take thinking as {type: "enabled",
+# budget_tokens: N} rather than adaptive. Sending them unconditionally makes
+# every request fail before it does any work, which is exactly what happened
+# when the gate was first pointed at Haiku to save money.
+#
+# Anything not listed here gets the conservative request shape: no thinking
+# parameter and no effort, which is valid on every model. That costs a little
+# quality on an unrecognised model and costs nothing on a recognised one, which
+# is the right way round for a default.
+_ADAPTIVE_MODELS = (
+    "claude-opus-5", "claude-fable-5", "claude-mythos-5", "claude-sonnet-5",
+    "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6",
+)
+
+
+def supports_adaptive_thinking(model):
+    """Whether `model` accepts adaptive thinking and an effort setting."""
+    return any(model.startswith(prefix) for prefix in _ADAPTIVE_MODELS)
+
+
+class ConfigurationError(Exception):
+    """The request is wrong, not the data.
+
+    A bad model id, an unsupported parameter, or a missing key fails the same
+    way on every image. Treating it as a per-row outcome means burning through
+    the whole corpus to collect thousands of identical failures, so this
+    aborts the run instead.
+    """
+
+
 class RefusalError(Exception):
     """The model declined. Distinct from a transport failure: retrying the
     same request will decline again, so it is a row outcome, not an error to
@@ -85,22 +117,36 @@ class Reader:
         self.usage = Usage()
 
     def _call(self, pass_name, model, system, content, output_format):
-        message = self._client.messages.parse(
-            model=model,
-            max_tokens=MAX_TOKENS[pass_name],
+        request = {
+            "model": model,
+            "max_tokens": MAX_TOKENS[pass_name],
             # The system block is byte-identical across every image, so it is
             # the natural cache prefix. Volatile content (the image) follows
             # it, never precedes it.
-            system=[{
+            "system": [{
                 "type": "text",
                 "text": system,
                 "cache_control": {"type": "ephemeral"},
             }],
-            messages=[{"role": "user", "content": content}],
-            thinking={"type": "adaptive"},
-            output_config={"effort": EFFORT[pass_name]},
-            output_format=output_format,
-        )
+            "messages": [{"role": "user", "content": content}],
+            "output_format": output_format,
+        }
+        if supports_adaptive_thinking(model):
+            request["thinking"] = {"type": "adaptive"}
+            request["output_config"] = {"effort": EFFORT[pass_name]}
+
+        try:
+            message = self._client.messages.parse(**request)
+        except (anthropic.AuthenticationError, anthropic.PermissionDeniedError,
+                anthropic.NotFoundError, anthropic.BadRequestError) as exc:
+            # Surface the API's own words. The failure this replaces reported
+            # "3 frame(s) unusable" for what was really a rejected request,
+            # which is a symptom with the cause deleted.
+            raise ConfigurationError(
+                "%s rejected the %s request for model %r: %s"
+                % (type(exc).__name__, pass_name, model, exc)
+            ) from exc
+
         self.usage.add(message.usage)
         if message.stop_reason == "refusal":
             detail = getattr(message.stop_details, "category", None)

@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 
 from .. import __version__
 from . import prompts, triangulate
-from .client import DEFAULT_MODEL, Reader, RefusalError
+from .client import ConfigurationError, DEFAULT_MODEL, Reader, RefusalError
 from .crop import dimensions
 from .schema import GateResult, Readability
 
@@ -132,6 +132,10 @@ def calibrate_site(link, rows, reader):
     for row in rows:
         try:
             obs = sight(row, reader)
+        except ConfigurationError:
+            # Not this frame's fault, and it will fail identically on every
+            # remaining one. Let it out so the run stops.
+            raise
         except RefusalError as exc:
             failures.append("refusal: %s" % exc)
             continue
@@ -154,10 +158,16 @@ def calibrate_site(link, rows, reader):
         result.update(triangulate.solve(observations))
     except triangulate.Unsolvable as exc:
         result.update({"status": "UNSOLVED", "note": str(exc)})
-    if failures and result["status"] == "ok":
-        result["note"] = "%d frame(s) unusable" % len(failures)
-    elif failures:
-        result["note"] = "%s; %d frame(s) unusable" % (result["note"], len(failures))
+    if failures:
+        # Carry the actual reason, not just a tally. A count alone turns a
+        # diagnosable failure into a mystery -- "3 frame(s) unusable" reads
+        # the same whether the board was behind a tree or the request was
+        # rejected outright.
+        detail = failures[0]
+        if len(failures) > 1:
+            detail = "%s (+%d more)" % (detail, len(failures) - 1)
+        result["note"] = ("%s; %s" % (result["note"], detail)
+                          if result["note"] else detail)
     return result
 
 
@@ -231,25 +241,35 @@ def main(argv=None):
     lock = threading.Lock()
     started = datetime.now(timezone.utc)
 
-    with ThreadPoolExecutor(max_workers=opts.concurrency) as pool:
-        futures = {
-            pool.submit(calibrate_site, link, rows, reader): link
-            for link, rows in frames.items()
-        }
-        for i, future in enumerate(as_completed(futures), 1):
-            link = futures[future]
-            try:
-                result = future.result()
-            except Exception as exc:  # noqa: BLE001
-                result = {"source_link": link, "status": "ERROR",
-                          "sightings": 0, "frames_tried": len(frames[link]),
-                          "note": "%s: %s" % (type(exc).__name__, exc)}
-            with lock:
-                results.append(result)
-            print("[%d/%d] %-46s %s  %s" % (
-                i, len(frames), link[-46:], result["status"],
-                ("%.0f m" % result["distance_m"]) if result.get("distance_m") else ""),
-                file=sys.stderr)
+    try:
+        with ThreadPoolExecutor(max_workers=opts.concurrency) as pool:
+            futures = {
+                pool.submit(calibrate_site, link, rows, reader): link
+                for link, rows in frames.items()
+            }
+            for i, future in enumerate(as_completed(futures), 1):
+                link = futures[future]
+                try:
+                    result = future.result()
+                except ConfigurationError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    result = {"source_link": link, "status": "ERROR",
+                              "sightings": 0, "frames_tried": len(frames[link]),
+                              "note": "%s: %s" % (type(exc).__name__, exc)}
+                with lock:
+                    results.append(result)
+                print("[%d/%d] %-46s %s  %s" % (
+                    i, len(frames), link[-46:], result["status"],
+                    ("%.0f m" % result["distance_m"])
+                    if result.get("distance_m") else ""),
+                    file=sys.stderr)
+    except ConfigurationError as exc:
+        print("\nfatal: %s" % exc, file=sys.stderr)
+        print("\nNothing was written. This fails identically on every frame, "
+              "so the run stopped rather than repeating it 1,000 times.",
+              file=sys.stderr)
+        return 2
 
     filled, total, out_path = write_outputs(opts.outdir, opts.boards, results)
     finished = datetime.now(timezone.utc)
