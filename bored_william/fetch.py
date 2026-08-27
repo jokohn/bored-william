@@ -50,7 +50,7 @@ def _row_float(src, column, fallback, allow_negative=False):
 
 def build_parser():
     p = argparse.ArgumentParser(
-        prog="bored-william",
+        prog="bored-william fetch",
         description=(
             "Turn Street View share links into a reproducible image-and-"
             "metadata dataset of roadside billboards across their full "

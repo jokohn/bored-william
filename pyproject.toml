@@ -18,8 +18,10 @@ classifiers = [
 ]
 dependencies = []
 
+# One console script. Stages are subcommands of it, not separate
+# executables -- see bored_william/main.py.
 [project.scripts]
-bored-william = "bored_william.cli:main"
+bored-william = "bored_william.main:main"
 
 [tool.setuptools]
 packages = ["bored_william"]
